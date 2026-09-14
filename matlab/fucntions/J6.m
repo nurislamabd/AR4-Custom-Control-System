@@ -1,0 +1,255 @@
+function [count, displaySpeed, dir, pul, next, limit, homed] = J6(startNext, clk, dt, rst, speedRPM, positionAngle, currCount, accelRPMperSec, mode)
+% J6 - Joint 6 position/speed controller with S-curve acceleration + HOMING
+%
+% AR4-MK3 robot. Continuous-rotation wrist joint (+/-180 = same physical spot).
+% positionAngle is remapped +180 internally. Switch is at count 0.
+%
+% MODE:
+%   0 = POSITION, 1 = INITIALIZE (drive to HOME_TARGET), 2 = HOMING
+%
+%   >>> maxCount = 20000   GEAR_RATIO = 20000/4000 = 5.0
+%   >>> J6 may sit AT the switch (180/-180); limit only flags on TRUE overtravel.
+
+    persistent currentCount lastClkState lastCount spTimer smoothedSpeed ...
+               currentRPM distTraveled totalMoveFrozen lastTarget pulseAccum ...
+               homedFlag lastMode;
+
+    % -------------------------------------------------------------------------
+    % CONSTANTS
+    % -------------------------------------------------------------------------
+    Ts           = 3e-5;
+    PPR          = 1000;
+    CPR          = PPR * 4;
+    GEAR_RATIO   = 20000 / CPR;
+    maxCount     = 20000;
+    LIMIT_BUFFER = 5;        % used for homing/fault logic (NOT target clamp)
+    TARGET_MARGIN = 0;       % <<< target clamp margin: 0 = allow reaching both ends
+    OVERTRAVEL   = 30;       % <<< counts beyond range before a REAL fault trips
+    TUNE_C2R     = 0.8;
+    C2R          = (GEAR_RATIO * CPR) / 60 * TUNE_C2R;
+
+    speedUpdateInterval = 0.2;
+    ALPHA               = 0.3;
+    MIN_RPM             = 0.5;
+    STOP_COUNTS         = 1;
+
+    HOME_RPM    = 5;    % <<< tune: slow safe homing speed (RPM)
+    HOME_TARGET = 0;    % <<< angle commanded in mode=1, for THIS joint (deg)
+
+    % -------------------------------------------------------------------------
+    % INITIALISATION (first call only)
+    % -------------------------------------------------------------------------
+    if isempty(currentCount)
+        currentCount    = currCount;
+        lastCount       = currCount;
+        lastClkState    = clk;
+        spTimer         = 0;
+        smoothedSpeed   = 0;
+        currentRPM      = MIN_RPM;
+        distTraveled    = 0;
+        totalMoveFrozen = 0;
+        lastTarget      = -1;
+        pulseAccum      = 0;
+        homedFlag       = false;
+        lastMode        = 0;
+    end
+
+    % Always-assigned outputs
+    limit = false;
+    homed = homedFlag;
+    dir   = 0;
+    pul   = 0;
+    next  = false;
+
+    % -------------------------------------------------------------------------
+    % 1. ENCODER COUNTING  (runs regardless of mode)
+    % -------------------------------------------------------------------------
+    if clk ~= lastClkState && clk == 1
+        if dt ~= clk
+            currentCount = currentCount + 1;
+        else
+            currentCount = currentCount - 1;
+        end
+    end
+
+    % -------------------------------------------------------------------------
+    % RESET S-CURVE STATE ON ANY MODE CHANGE
+    % -------------------------------------------------------------------------
+    if mode ~= lastMode
+        distTraveled    = 0;
+        totalMoveFrozen = 0;
+        pulseAccum      = 0;
+        lastTarget      = -1;
+        currentRPM      = MIN_RPM;
+        spTimer         = 0;
+        smoothedSpeed   = 0;
+    end
+    lastMode = mode;
+
+    % =========================================================================
+    % MODE 2: HOMING  -  drive toward switch, zero count on contact
+    % =========================================================================
+    if mode == 2
+
+        if rst == 1
+            currentCount = 250;
+            homedFlag    = true;
+        end
+
+        homed = homedFlag;   % switch contact during homing is expected, not a fault
+
+        if homedFlag
+            currentCount = 250;
+            pul          = 0;
+            next         = true;
+        elseif startNext
+            dir        = 0;   % toward switch = decreasing count
+            pulseAccum = pulseAccum + HOME_RPM * C2R * Ts;
+            if pulseAccum >= 1.0
+                pul        = 1;
+                pulseAccum = pulseAccum - 1.0;
+            end
+        end
+
+        count        = currentCount;
+        displaySpeed = HOME_RPM;
+        lastClkState = clk;
+        return;   % skip position control entirely
+    end
+    % =========================================================================
+
+    % -------------------------------------------------------------------------
+    % 2. SPEED DISPLAY
+    % -------------------------------------------------------------------------
+    spTimer = spTimer + Ts;
+    if spTimer >= speedUpdateInterval
+        smoothedSpeed = ALPHA * currentRPM + (1 - ALPHA) * smoothedSpeed;
+        spTimer       = 0;
+    end
+
+    % -------------------------------------------------------------------------
+    % 3. TARGET FROM ANGLE
+    % -------------------------------------------------------------------------
+    if mode == 1
+        cmdAngle = HOME_TARGET;
+    else
+        cmdAngle = positionAngle;
+    end
+
+    cmdAngleRemap = cmdAngle + 180;   % J6 internal remap (+180)
+    countsPerDeg  = maxCount / 360;
+    targetCount   = round(cmdAngleRemap * countsPerDeg);
+    % Allow reaching both ends (0 and maxCount) so 180/-180 are attainable.
+    targetCount   = max(TARGET_MARGIN, min(maxCount - TARGET_MARGIN, targetCount));
+
+    % -------------------------------------------------------------------------
+    % 4. DIRECTION
+    % -------------------------------------------------------------------------
+    countError = targetCount - currentCount;
+    absError   = abs(countError);
+
+    if countError >= 0
+        dir = 1;   % CCW
+    else
+        dir = 0;   % CW
+    end
+
+    % -------------------------------------------------------------------------
+    % 5. FREEZE totalMove ON NEW TARGET
+    % -------------------------------------------------------------------------
+    if targetCount ~= lastTarget
+        totalMoveFrozen = absError;
+        distTraveled    = 0;
+        pulseAccum      = 0;
+        lastTarget      = targetCount;
+    end
+
+    % -------------------------------------------------------------------------
+    % 6. S-CURVE SPEED PROFILE
+    % -------------------------------------------------------------------------
+    accel = max(accelRPMperSec, 0.1);
+    fullRampCounts = 0.5 * (MIN_RPM + speedRPM) * C2R * (speedRPM - MIN_RPM) / accel;
+
+    if totalMoveFrozen > 0 && 2 * fullRampCounts >= totalMoveFrozen
+        peakRPM    = sqrt(max(MIN_RPM^2 + totalMoveFrozen * accel / C2R, MIN_RPM^2));
+        peakRPM    = max(MIN_RPM, min(speedRPM, peakRPM));
+        rampCounts = 0.5 * (MIN_RPM + peakRPM) * C2R * (peakRPM - MIN_RPM) / accel;
+        rampCounts = max(1, rampCounts);
+    else
+        peakRPM    = speedRPM;
+        rampCounts = max(1, fullRampCounts);
+    end
+
+    if totalMoveFrozen <= 0
+        targetRPM = MIN_RPM;
+    elseif absError <= rampCounts
+        x         = max(0.0, min(1.0, absError / rampCounts));
+        targetRPM = MIN_RPM + (peakRPM - MIN_RPM) * 0.5 * (1 - cos(pi * x));
+    elseif distTraveled <= rampCounts
+        x         = max(0.0, min(1.0, distTraveled / rampCounts));
+        targetRPM = MIN_RPM + (peakRPM - MIN_RPM) * 0.5 * (1 - cos(pi * x));
+    else
+        targetRPM = peakRPM;
+    end
+
+    currentRPM = max(MIN_RPM, min(speedRPM, targetRPM));
+
+    % -------------------------------------------------------------------------
+    % 7. DDS PULSE ACCUMULATOR
+    % -------------------------------------------------------------------------
+    if startNext && absError > STOP_COUNTS
+        pulseAccum = pulseAccum + currentRPM * C2R * Ts;
+        if pulseAccum >= 1.0
+            pul          = 1;
+            pulseAccum   = pulseAccum - 1.0;
+            distTraveled = distTraveled + 1;
+        end
+        next = false;
+    else
+        next       = (absError <= STOP_COUNTS);
+        pulseAccum = 0;
+    end
+
+    % -------------------------------------------------------------------------
+    % 8. LIMIT SWITCH SAFETY  -  flag ONLY on true over-travel
+    % -------------------------------------------------------------------------
+    % Clear homedFlag once we have moved meaningfully away from the switch,
+    % so a later genuine over-travel can still be detected.
+    if homedFlag && currentCount > LIMIT_BUFFER
+        homedFlag = false;
+    end
+
+    % TRUE FAULT: only if the joint travels BEYOND the valid count range.
+    % Sitting AT the switch (count == 0) or AT the far end (count == maxCount)
+    % is allowed and does NOT trip a fault. Only exceeding the range by more
+    % than OVERTRAVEL counts is a real fault.
+    if currentCount < -OVERTRAVEL
+        limit = true;
+        pul   = 0;
+    end
+    if currentCount > (maxCount + OVERTRAVEL)
+        limit = true;
+        pul   = 0;
+    end
+
+    % -------------------------------------------------------------------------
+    % 8.5 MODE-0 PULSE SUPPRESSION
+    %     In position mode, CoordMove owns all pulse/dir generation.
+    %     Force this block's own pul/dir to 0 so it can't leak a second
+    %     pulse stream to the driver. Encoder counting + limit safety above
+    %     still run normally every tick.
+    % -------------------------------------------------------------------------
+    if mode == 0
+        pul = 0;
+    end
+
+
+    % -------------------------------------------------------------------------
+    % 9. OUTPUTS
+    % -------------------------------------------------------------------------
+    count        = currentCount;
+    displaySpeed = smoothedSpeed;
+    homed        = homedFlag;
+    lastClkState = clk;
+
+end
