@@ -204,8 +204,8 @@ The stationary check exists so blocks can be added while the robot is running. W
 └── media/
     ├── setup.jpg                      # workspace photo
     ├── pickplace_preview.gif          # inline README preview
-    ├── pick_up_demo.MOV               # full pick-and-place video
-    └── callibration_demo.MOV          # full homing video
+    ├── pick_up_demo.mp4               # full pick-and-place video
+    └── callibration_demo.mp4          # full homing video
 ```
 
 > **Note on the `functions/` folder.** These `.m` files are copies of the code inside the model's MATLAB Function blocks, kept separately so the logic is readable on GitHub — a `.slx` is a binary container and shows nothing in a diff. The model is the source of truth; these are for review.
