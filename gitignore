@@ -1,0 +1,28 @@
+# Simulink / Embedded Coder build output
+*_ert_rtw/
+*_grt_rtw/
+slprj/
+sccprj/
+codegen/
+
+# Simulink cache and autosave
+*.slxc
+*.autosave
+*.asv
+*.m~
+
+# Compiled binaries
+*.bin
+*.elf
+*.hex
+*.o
+*.a
+
+# MATLAB
+*.mex*
+*.mat.bak
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
