@@ -9,7 +9,7 @@ Summer research project, 2026 — Nuris Abdyldaev.
 ## The setup
 
 <p align="center">
-  <img src="media/setup.jpg" alt="AR4 MK3 arm with overhead camera and colour-sorting workspace" width="600">
+  <img src="media/setup.png" alt="AR4 MK3 arm with overhead camera and colour-sorting workspace" width="600">
 </p>
 
 <p align="center"><i>The AR4 MK3 arm, overhead webcam, and block workspace.</i></p>
